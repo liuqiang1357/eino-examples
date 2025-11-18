@@ -170,16 +170,9 @@ func (cb *LoggerCallback) OnEndWithStreamOutput(ctx context.Context, info *callb
 					fmt.Printf("[ERROR] failed to recv from stream: %v\n", err)
 					return
 				}
-
-				// Handle different types of output
-				switch v := frame.(type) {
-				case *schema.Message:
-					if v.Content != "" {
-						fmt.Printf("%v: %v\n", schema.Assistant, v.Content)
-					}
-				case *model.CallbackOutput:
-					if v.Message != nil && v.Message.Content != "" {
-						fmt.Printf("%v: %v\n", schema.Assistant, v.Message.Content)
+				if cbo := model.ConvCallbackOutput(frame); cbo != nil && cbo.Message != nil {
+					if cbo.Message.Content != "" {
+						fmt.Printf("%v: %v\n", schema.Assistant, cbo.Message.Content)
 					}
 				}
 			}
