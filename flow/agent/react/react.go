@@ -24,9 +24,10 @@ import (
 	"os"
 
 	"github.com/cloudwego/eino-examples/flow/agent/react/tools"
-	"github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino-ext/components/model/deepseek"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent"
@@ -37,19 +38,36 @@ import (
 func main() {
 	ctx := context.Background()
 
-	config := &openai.ChatModelConfig{
-		APIKey: os.Getenv("OPENAI_API_KEY"),
-		Model:  "gpt-4o-mini",
+	config := &deepseek.ChatModelConfig{
+		APIKey:  os.Getenv("DEEPSEEK_API_KEY"),
+		Model:   "deepseek-chat",
 	}
 
-	arkModel, err := openai.NewChatModel(ctx, config)
+	arkModel, err := deepseek.NewChatModel(ctx, config)
 	if err != nil {
 		fmt.Printf("[ERROR] failed to create chat model: %v\n", err)
 		return
 	}
 
+	toolCallChecker := func(ctx context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
+		defer sr.Close()
+		for {
+			msg, err := sr.Recv()
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return false, nil
+				}
+				return false, err
+			}
+			if len(msg.ToolCalls) > 0 {
+				return true, nil
+			}
+		}
+	}
+
 	ragent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: arkModel,
+		ToolCallingModel:      arkModel,
+		StreamToolCallChecker: toolCallChecker,
 		ToolsConfig: compose.ToolsNodeConfig{
 			Tools: []tool.BaseTool{
 				tools.GetRestaurantTool(),
@@ -83,17 +101,15 @@ func main() {
 
 	fmt.Printf("[STREAM] Start streaming...\n\n")
 
+	// Drain the stream to ensure all callbacks are executed and the stream completes
 	for {
-		msg, err := sr.Recv()
+		_, err := sr.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
 			fmt.Printf("[ERROR] failed to recv: %v\n", err)
 			return
-		}
-		if msg.Content != "" {
-			fmt.Printf("%v: %v\n", msg.Role, msg.Content)
 		}
 	}
 
@@ -141,6 +157,35 @@ func (cb *LoggerCallback) OnStartWithStreamInput(ctx context.Context, info *call
 
 func (cb *LoggerCallback) OnEndWithStreamOutput(ctx context.Context, info *callbacks.RunInfo,
 	output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
-	defer output.Close()
+	// Only handle ChatModel stream output to avoid blocking by toolCallChecker
+	if info.Component == components.ComponentOfChatModel {
+		go func() {
+			defer output.Close()
+			for {
+				frame, err := output.Recv()
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						break
+					}
+					fmt.Printf("[ERROR] failed to recv from stream: %v\n", err)
+					return
+				}
+
+				// Handle different types of output
+				switch v := frame.(type) {
+				case *schema.Message:
+					if v.Content != "" {
+						fmt.Printf("%v: %v\n", schema.Assistant, v.Content)
+					}
+				case *model.CallbackOutput:
+					if v.Message != nil && v.Message.Content != "" {
+						fmt.Printf("%v: %v\n", schema.Assistant, v.Message.Content)
+					}
+				}
+			}
+		}()
+	} else {
+		defer output.Close()
+	}
 	return ctx
 }
