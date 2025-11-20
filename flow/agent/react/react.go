@@ -125,6 +125,13 @@ func (cb *LoggerCallback) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 		tci := tool.ConvCallbackInput(input)
 		if tci != nil {
 			fmt.Printf("[TOOL] %s: %s\n", info.Name, tci.ArgumentsInJSON)
+			
+			// 创建工具执行状态并存入 context
+			// 使用指针，这样在 InvokableRun 中修改后，OnEnd 中可以读取到修改后的值
+			state := &tools.ToolExecutionState{
+				Success: false, // 初始为 false，在 InvokableRun 中根据实际情况设置
+			}
+			ctx = tools.SetToolState(ctx, state)
 		}
 	}
 	return ctx
@@ -139,6 +146,17 @@ func (cb *LoggerCallback) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 				responseStr = responseStr[:200] + "..."
 			}
 			fmt.Printf("[TOOL] %s: result = %s\n", info.Name, responseStr)
+			
+			// 读取工具执行状态（在 OnStart 中创建，在 InvokableRun 中修改）
+			state := tools.GetToolState(ctx)
+			if state != nil {
+				// 判断工具调用是否成功
+				if state.Success {
+					fmt.Printf("[TOOL] %s: execution succeeded\n", info.Name)
+				} else {
+					fmt.Printf("[TOOL] %s: execution failed\n", info.Name)
+				}
+			}
 		}
 	}
 	return ctx

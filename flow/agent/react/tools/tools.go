@@ -19,20 +19,84 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math/rand"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
+// ToolExecutionState 用于在 InvokableRun 和 OnEnd callback 之间传递执行状态
+// 使用指针类型，可以在 InvokableRun 中修改，在 OnEnd 中读取
+type ToolExecutionState struct {
+	// Success 表示工具调用是否成功
+	Success bool
+}
+
+type toolStateKey struct{}
+
+// GetToolState 从 context 中获取工具执行状态
+// 如果不存在则返回 nil
+func GetToolState(ctx context.Context) *ToolExecutionState {
+	v := ctx.Value(toolStateKey{})
+	if v == nil {
+		return nil
+	}
+	state, ok := v.(*ToolExecutionState)
+	if !ok {
+		return nil
+	}
+	return state
+}
+
+// SetToolState 将工具执行状态设置到 context 中
+// 返回新的 context（虽然返回的 context 不会被 InvokableRun 使用，
+// 但指针指向的内存地址在 OnStart 和 OnEnd 中是共享的）
+func SetToolState(ctx context.Context, state *ToolExecutionState) context.Context {
+	return context.WithValue(ctx, toolStateKey{}, state)
+}
+
+// safeTool wraps a tool to convert errors into error messages that the model can handle.
+// When a tool returns an error, safeTool returns the error message as a string instead of propagating the error,
+// allowing the model to see the error and decide whether to retry or use another tool.
+type safeTool struct {
+	tool.InvokableTool
+}
+
+func (s safeTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return s.InvokableTool.Info(ctx)
+}
+
+func (s safeTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	out, e := s.InvokableTool.InvokableRun(ctx, argumentsInJSON, opts...)
+	
+	// 设置执行状态：仅当 e 为空时认为成功
+	state := GetToolState(ctx)
+	if state != nil {
+		state.Success = (e == nil)
+	}
+	
+	if e != nil {
+		// Return error message as string instead of error, so the model can see it and decide next action
+		return e.Error(), nil
+	}
+	return out, nil
+}
+
 func GetRestaurantTool() tool.InvokableTool {
-	return &ToolQueryRestaurants{
-		backService: restService,
+	return safeTool{
+		InvokableTool: &ToolQueryRestaurants{
+			backService: restService,
+		},
 	}
 }
 
 func GetDishTool() tool.InvokableTool {
-	return &ToolQueryDishes{
-		backService: restService,
+	return safeTool{
+		InvokableTool: &ToolQueryDishes{
+			backService: restService,
+		},
 	}
 }
 
@@ -71,6 +135,18 @@ func (t *ToolQueryRestaurants) InvokableRun(ctx context.Context, argumentsInJSON
 	}
 	if p.Topn == 0 {
 		p.Topn = 3
+	}
+
+	// 随机报错测试（50% 概率），错误中提示可以重试
+	rand.Seed(time.Now().UnixNano())
+	if rand.Float32() < 0.5 {
+		errorMsg := map[string]string{
+			"error":   "service temporarily unavailable",
+			"message": "The restaurant service is temporarily unavailable. Please retry later.",
+			"retry":   "true",
+		}
+		errorJSON, _ := json.Marshal(errorMsg)
+		return "", fmt.Errorf("%s", string(errorJSON))
 	}
 
 	// 请求后端服务
